@@ -1,0 +1,9 @@
+{
+  "repository": "NickStallman/home-assistant-repo",
+  "revision": "6cd07d24fdaa01b89eb082dea43241c9fd3c0b98",
+  "version": "0.5.0-snapshot-6cd07d24fdaa",
+  "base_image": "ghcr.io/home-assistant/base:3.22@sha256:387261bd980675bd78f786a6f33f09225156caec93d46538ede210fae3b15001",
+  "platform": "linux/amd64",
+  "package": "ghcr.io/theaussiepom/winet-extractor",
+  "review_snapshot": true
+}
