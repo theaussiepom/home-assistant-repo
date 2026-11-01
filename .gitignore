@@ -1,0 +1,9 @@
+/.upstream/
+/image.tar.gz
+/image.sha256
+/image-receipt.json
+/runtime-smoke.json
+/npm-audit-all.json
+/npm-audit-runtime.json
+/security-review.json
+__pycache__/

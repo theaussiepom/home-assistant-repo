@@ -1,0 +1,141 @@
+name: WiNet image
+
+on:
+  pull_request:
+    paths: ['.github/workflows/winet-image.yml', 'publication/**']
+  push:
+    branches: [main]
+    paths: ['.github/workflows/winet-image.yml', 'publication/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winet-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      artifact-id: ${{ steps.artifact.outputs.artifact-id }}
+    steps:
+      - name: Checkout publisher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read upstream pin
+        id: source
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          s = json.loads(Path('publication/source.json').read_text())
+          assert s['repository'] == 'NickStallman/home-assistant-repo'
+          assert re.fullmatch('[0-9a-f]{40}', s['revision'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('revision=' + s['revision'] + '\n')
+          PY
+      - name: Checkout upstream
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NickStallman/home-assistant-repo
+          ref: ${{ steps.source.outputs.revision }}
+          path: .upstream
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Test upstream
+        working-directory: .upstream/winet-extractor
+        run: |
+          npm ci --ignore-scripts --no-fund
+          npm test
+      - name: Record security findings
+        run: python3 publication/audit.py .upstream/winet-extractor
+      - name: Build image
+        run: python3 publication/build.py .upstream winet-verified:review
+      - name: Check upstream startup
+        run: python3 .upstream/winet-extractor/test/container_startup.py winet-verified:review
+      - name: Test MQTT readings
+        run: python3 publication/runtime_smoke.py winet-verified:review
+      - name: Package tested image
+        run: |
+          docker save winet-verified:review | gzip > image.tar.gz
+          sha256sum image.tar.gz > image.sha256
+          cat security-review.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Save review build
+        id: artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: winet-review-build
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            image.tar.gz
+            image.sha256
+            image-receipt.json
+            runtime-smoke.json
+            npm-audit-all.json
+            npm-audit-runtime.json
+            security-review.json
+
+  publish:
+    name: Publish review image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'theaussiepom/home-assistant-repo'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download tested image
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          merge-multiple: true
+      - name: Verify tested image
+        id: image
+        env:
+          PUBLISHER_REVISION: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          sha256sum -c image.sha256
+          docker load --input image.tar.gz
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          r = json.loads(Path('image-receipt.json').read_text())
+          s = json.loads(Path('runtime-smoke.json').read_text())
+          assert r['publisher_revision'] == os.environ['PUBLISHER_REVISION']
+          assert r['repository'] == 'NickStallman/home-assistant-repo'
+          assert r['package'] == 'ghcr.io/theaussiepom/winet-extractor'
+          assert r['application_source_modified'] is False and r['review_snapshot'] is True
+          assert s['status'] == 'passed' and s['external_network'] is False
+          c = json.loads(subprocess.check_output(['docker', 'image', 'inspect', 'winet-verified:review']))[0]
+          assert c['Id'] == r['image_id'] and c['Architecture'] == 'amd64'
+          assert c['Config']['Labels']['org.opencontainers.image.revision'] == r['revision']
+          tag = r['package'] + ':upstream-' + r['revision'][:12] + '-' + os.environ['RUN_ID'] + '-' + os.environ['RUN_ATTEMPT']
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('tag=' + tag + '\n')
+          PY
+      - name: Login to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish tested image
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          docker tag winet-verified:review "$IMAGE_TAG"
+          docker push "$IMAGE_TAG"
+          printf 'Published review image: `%s`\n\n' "$IMAGE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Security review remains separate. No HomeLab configuration or deployment was changed.\n' >> "$GITHUB_STEP_SUMMARY"
